@@ -27,7 +27,7 @@ using HttpClient sharedClient = new();
 var tasks = new Task[batchSize];
 var mainPbOptions = new ProgressBarOptions
 {
-    CollapseWhenFinished = true,
+    CollapseWhenFinished = false,
     ProgressCharacter = '─',
 };
 ProgressBar? mainPb = null;
@@ -41,57 +41,62 @@ try
     }
 
     mainPb = new ProgressBar(urls.Count, $"Downloading 0 of {urls.Count}", mainPbOptions);
+    // Track stats
     var downloaded = 0;
     var cancelled = 0;
     var failed = 0;
-    var nextIdx = 0;
-    while (nextIdx < Math.Min(urls.Count, tasks.Length))
+    var completed = 0;
+    // unused URLs
+    var nextUnusedUrlIdx = 0;
+    // Queue up the first batch of downloads.
+    while (nextUnusedUrlIdx < Math.Min(urls.Count, tasks.Length))
     {
-        var url = urls[nextIdx];
-        tasks[nextIdx++] = DownloadFile(nextIdx, url, sharedClient, mainPb, cts.Token);
+        var url = urls[nextUnusedUrlIdx];
+        tasks[nextUnusedUrlIdx++] = DownloadFile(nextUnusedUrlIdx, url, sharedClient, mainPb, cts.Token);
     }
 
-    var completedTasks = 0;
-    while ((downloaded + cancelled + failed) < urls.Count)
+    // While we haven't processed all files, wait for any task to complete then add any unprocessed urls to the just
+    // completed slot.
+    // If there are no more urls to process, wait on just the incomplete tasks
+    while (downloaded + cancelled + failed < urls.Count)
     {
         // Exclude completed tasks
-        var trimmed = tasks.Take(tasks.Length - completedTasks);
-        var completedTask = await Task.WhenAny(trimmed);
-        if (completedTask.IsCompletedSuccessfully)
+        var filtered = tasks.Where(static t => !t.IsCompleted);
+        var completedTask = await Task.WhenAny(filtered);
+        completed++;
+        switch (completedTask.Status)
         {
-            downloaded++;
-        }
-        else if (completedTask.IsCanceled)
-        {
-            cancelled++;
-        }
-        else
-        {
-            failed++;
+            case TaskStatus.RanToCompletion:
+                downloaded++;
+                break;
+            case TaskStatus.Canceled:
+                cancelled++;
+                break;
+            case TaskStatus.Faulted:
+                failed++;
+                break;
+            case TaskStatus.Created:
+            case TaskStatus.WaitingForActivation:
+            case TaskStatus.WaitingToRun:
+            case TaskStatus.Running:
+            case TaskStatus.WaitingForChildrenToComplete:
+            default:
+                break;
         }
 
-        var allFinal = downloaded + cancelled + failed;
-        mainPb.Tick(allFinal);
+        mainPb.Tick(completed);
         // just completed task
         var finishedIdx = Array.IndexOf(tasks, completedTask);
-        
-        
-        mainPb.Message = allFinal == urls.Count
+
+        mainPb.Message = completed == urls.Count
             ? $"Downloaded {downloaded}, cancelled {cancelled}, failed {failed}"
-            : $"Processed {allFinal} of {urls.Count} files";
+            : $"Processed {completed} of {urls.Count} files";
         
-        var lastIndex = tasks.Length - 1;
-        if (nextIdx < urls.Count)
+        if (nextUnusedUrlIdx < urls.Count)
         {
-            // schedule any unscheduled downloads.
-            var url = urls[nextIdx];
-            tasks[finishedIdx] = DownloadFile(++nextIdx, url, sharedClient, mainPb, cts.Token);
-        }
-        else
-        {
-            // swap finished idx with last, then exclude last
-            (tasks[finishedIdx], tasks[lastIndex - completedTasks]) = (tasks[lastIndex - completedTasks], tasks[finishedIdx]);
-            completedTasks++;
+            // download any unprocessed URLs.
+            var url = urls[nextUnusedUrlIdx];
+            tasks[finishedIdx] = DownloadFile(++nextUnusedUrlIdx, url, sharedClient, mainPb, cts.Token);
         }
     }
 
@@ -175,7 +180,6 @@ async Task DownloadFile(int id, string url, HttpClient client, ProgressBarBase? 
             await fileStream.WriteAsync(buffer.AsMemory(start: 0, length: read), cancellationToken)
                 .ConfigureAwait(false);
             downloaded += read;
-            // if (downloaded % (1024 * 10) != 0) continue;
             lastSpeed = downloaded / timer.Elapsed.TotalSeconds;
             childPb?.Tick((int)downloaded,
                 GetMessageFromDownloadInfo(
@@ -223,7 +227,7 @@ async Task DownloadFile(int id, string url, HttpClient client, ProgressBarBase? 
     }
 }
 
-readonly record struct DownloadProgressInfo(
+internal readonly record struct DownloadProgressInfo(
     int Id,
     long DownloadedBytes,
     long? TotalBytes,
