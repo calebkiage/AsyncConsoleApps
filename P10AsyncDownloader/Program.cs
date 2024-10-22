@@ -1,13 +1,16 @@
-﻿// read file with URLs
-
-using System.Collections.Concurrent;
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using ShellProgressBar;
 
 var sourcesFile = "sources.txt";
+var batchSize = 5;
 if (args.Length > 0)
 {
     sourcesFile = args[0];
+}
+
+if (args.Length > 1 && int.TryParse(args[1], out var value))
+{
+    batchSize = value;
 }
 
 var cts = new CancellationTokenSource();
@@ -18,37 +21,84 @@ Console.CancelKeyPress += async (_, eventArgs) =>
     await cts.CancelAsync();
 };
 
-cts.CancelAfter(5000);
+// cts.CancelAfter(1000);
 using HttpClient sharedClient = new();
 
-var tasks = new List<Task>();
+var tasks = new Task[batchSize];
 var mainPbOptions = new ProgressBarOptions
 {
-    CollapseWhenFinished = false,
+    CollapseWhenFinished = true,
+    ProgressCharacter = '─',
 };
 ProgressBar? mainPb = null;
 try
 {
-    var idx = 0;
     // Count lines
-    var urls = 0;
-    await foreach (var _ in File.ReadLinesAsync(sourcesFile, cts.Token))
-    {
-        urls++;
-    }
-
-    mainPb = new ProgressBar(urls, "Downloading files...", mainPbOptions);
+    var urls = new List<string>();
     await foreach (var url in File.ReadLinesAsync(sourcesFile, cts.Token))
     {
-        tasks.Add(DownloadFile(++idx, url, sharedClient, mainPb, cts.Token));
+        if (IsUrlValid(url)) urls.Add(url);
     }
 
-    await Task.WhenAll(tasks);
+    mainPb = new ProgressBar(urls.Count, $"Downloading 0 of {urls.Count}", mainPbOptions);
+    var downloaded = 0;
+    var cancelled = 0;
+    var failed = 0;
+    var nextIdx = 0;
+    while (nextIdx < Math.Min(urls.Count, tasks.Length))
+    {
+        var url = urls[nextIdx];
+        tasks[nextIdx++] = DownloadFile(nextIdx, url, sharedClient, mainPb, cts.Token);
+    }
+
+    var completedTasks = 0;
+    while ((downloaded + cancelled + failed) < urls.Count)
+    {
+        // Exclude completed tasks
+        var trimmed = tasks.Take(tasks.Length - completedTasks);
+        var completedTask = await Task.WhenAny(trimmed);
+        if (completedTask.IsCompletedSuccessfully)
+        {
+            downloaded++;
+        }
+        else if (completedTask.IsCanceled)
+        {
+            cancelled++;
+        }
+        else
+        {
+            failed++;
+        }
+
+        var allFinal = downloaded + cancelled + failed;
+        mainPb.Tick(allFinal);
+        // just completed task
+        var finishedIdx = Array.IndexOf(tasks, completedTask);
+        
+        
+        mainPb.Message = allFinal == urls.Count
+            ? $"Downloaded {downloaded}, cancelled {cancelled}, failed {failed}"
+            : $"Processed {allFinal} of {urls.Count} files";
+        
+        var lastIndex = tasks.Length - 1;
+        if (nextIdx < urls.Count)
+        {
+            // schedule any unscheduled downloads.
+            var url = urls[nextIdx];
+            tasks[finishedIdx] = DownloadFile(++nextIdx, url, sharedClient, mainPb, cts.Token);
+        }
+        else
+        {
+            // swap finished idx with last, then exclude last
+            (tasks[finishedIdx], tasks[lastIndex - completedTasks]) = (tasks[lastIndex - completedTasks], tasks[finishedIdx]);
+            completedTasks++;
+        }
+    }
+
     return 0;
 }
 catch (Exception ex) when (ex is OperationCanceledException or TaskCanceledException)
 {
-    Console.WriteLine("Canceled");
     return 2;
 }
 catch (Exception e)
@@ -75,7 +125,21 @@ static (double, string) HumanBytes(double bytes)
     };
 }
 
-async Task DownloadFile(int id, string url, HttpClient client, ProgressBar? progressBar,
+static bool IsUrlValid(string? url)
+{
+    if (string.IsNullOrWhiteSpace(url)) return false;
+    try
+    {
+        _ = new Uri(url);
+        return true;
+    }
+    catch (Exception)
+    {
+        return false;
+    }
+}
+
+async Task DownloadFile(int id, string url, HttpClient client, ProgressBarBase? progressBar,
     CancellationToken cancellationToken)
 {
     var fileName = Path.GetFileName(url);
@@ -89,12 +153,7 @@ async Task DownloadFile(int id, string url, HttpClient client, ProgressBar? prog
     long downloaded = 0;
     long? totalBytes = null;
     double lastSpeed = 0;
-    var childOptions = new ProgressBarOptions
-    {
-        CollapseWhenFinished = false
-    };
     IProgressBar? childPb = null;
-    IProgress<DownloadProgressInfo>? progress = null;
     try
     {
         timer.Restart();
@@ -103,21 +162,20 @@ async Task DownloadFile(int id, string url, HttpClient client, ProgressBar? prog
         response.EnsureSuccessStatusCode();
         totalBytes = response.Content.Headers.ContentLength;
         childPb = totalBytes.HasValue
-            ? progressBar?.Spawn((int)totalBytes.Value, string.Empty, childOptions)
-            : progressBar?.SpawnIndeterminate(string.Empty, childOptions);
-        // progress = childPb?.AsProgress<DownloadProgressInfo>(GetMessageFromDownloadInfo, GetPercentageFromDownloadInfo);
+            ? progressBar?.Spawn((int)totalBytes.Value, string.Empty)
+            : progressBar?.SpawnIndeterminate(string.Empty);
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.Read);
 
-        var buffer = new byte[8192];
+        var buffer = new byte[4096];
         int read;
         while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
         {
             await fileStream.WriteAsync(buffer.AsMemory(start: 0, length: read), cancellationToken)
                 .ConfigureAwait(false);
             downloaded += read;
-            if (downloaded % (1024 * 10) != 0) continue;
+            // if (downloaded % (1024 * 10) != 0) continue;
             lastSpeed = downloaded / timer.Elapsed.TotalSeconds;
             childPb?.Tick((int)downloaded,
                 GetMessageFromDownloadInfo(
@@ -126,9 +184,6 @@ async Task DownloadFile(int id, string url, HttpClient client, ProgressBar? prog
 
         childPb?.Tick((int)downloaded,
             GetMessageFromDownloadInfo(new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, false, true)));
-        progressBar?.Tick(progressBar.CurrentTick + 1 == progressBar.MaxTicks
-            ? "Downloads complete"
-            : $"Downloading {progressBar.CurrentTick} of {progressBar.MaxTicks}");
     }
     catch (OperationCanceledException)
     {
@@ -160,7 +215,7 @@ async Task DownloadFile(int id, string url, HttpClient client, ProgressBar? prog
         var total = info.TotalBytes;
         if (total is not null)
         {
-            var (totalH, totalUnit) = HumanBytes(info.DownloadedBytes);
+            var (totalH, totalUnit) = HumanBytes(total.Value);
             return $"{info.Id} downloading {downloadedH:F2} {unit} / {totalH:F2} {totalUnit}{speed}";
         }
 
