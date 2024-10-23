@@ -60,7 +60,8 @@ try
     while (!cts.IsCancellationRequested && downloaded + cancelled + failed < urls.Count)
     {
         // Exclude completed tasks
-        var filtered = tasks.Where(static t => !t.IsCompleted);
+        var filtered = tasks.Where(static t => !t.IsCompleted).ToArray();
+        if (filtered.Length == 0) continue;
         var completedTask = await Task.WhenAny(filtered);
         completed++;
         incomplete--;
