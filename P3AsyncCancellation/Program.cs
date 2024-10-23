@@ -2,32 +2,21 @@
 
 Console.WriteLine("Starting...");
 var cts = new CancellationTokenSource();
-var watch = Stopwatch.StartNew();
 var isCancelled = false;
-Console.CancelKeyPress += async (sender, eventArgs) =>
-{
-    // Don't exit the application.
-    eventArgs.Cancel = true;
-    isCancelled = true;
-    var key = eventArgs.SpecialKey switch
-    {
-        ConsoleSpecialKey.ControlBreak => "Ctrl+Break",
-        ConsoleSpecialKey.ControlC => "Ctrl+C",
-        _ => throw new ArgumentOutOfRangeException(nameof(eventArgs), eventArgs, "Invalid special key.")
-    };
-    Console.WriteLine($"Cancelling via {key}");
-    await cts.CancelAsync();
-};
-// Exclude the setup code timings
-watch.Restart();
-
-await Task.WhenAll(Sequential(cts.Token), Concurrent(cts.Token));
+var watch = Stopwatch.StartNew();
+await Task.WhenAll(CancelAfter(1200, cts, () => isCancelled = true), Sequential(cts.Token), Concurrent(cts.Token));
 
 Console.WriteLine(isCancelled
     ? $"Cancelled after {watch.ElapsedMilliseconds}ms."
     : $"Completed in {watch.ElapsedMilliseconds}ms.");
 return;
 
+async Task CancelAfter(int milliseconds, CancellationTokenSource tokenSource, Action callback)
+{
+    await Task.Delay(milliseconds);
+    tokenSource.Cancel();
+    callback();
+}
 async Task Sequential(CancellationToken token = default)
 {
     await DoWork("A sequential", 2000, token);

@@ -1,4 +1,5 @@
 ﻿using System.Diagnostics;
+using System.Text;
 using ShellProgressBar;
 
 var sourcesFile = "sources.txt";
@@ -40,30 +41,34 @@ try
         if (IsUrlValid(url)) urls.Add(url);
     }
 
-    mainPb = new ProgressBar(urls.Count, $"Downloading 0 of {urls.Count}", mainPbOptions);
+    mainPb = new ProgressBar(urls.Count,
+        $"0 downloaded, 0 cancelled, 0 failed, 0 incomplete, {urls.Count} unused of {urls.Count}", mainPbOptions);
     // Track stats
     var downloaded = 0;
     var cancelled = 0;
     var failed = 0;
+    var incomplete = 0;
     var completed = 0;
     // unused URLs
     var nextUnusedUrlIdx = 0;
     // Queue up the first batch of downloads.
-    while (nextUnusedUrlIdx < Math.Min(urls.Count, tasks.Length))
+    while (!cts.IsCancellationRequested && nextUnusedUrlIdx < Math.Min(urls.Count, tasks.Length))
     {
         var url = urls[nextUnusedUrlIdx];
         tasks[nextUnusedUrlIdx++] = DownloadFile(nextUnusedUrlIdx, url, sharedClient, mainPb, cts.Token);
+        incomplete++;
     }
 
     // While we haven't processed all files, wait for any task to complete then add any unprocessed urls to the just
     // completed slot.
     // If there are no more urls to process, wait on just the incomplete tasks
-    while (downloaded + cancelled + failed < urls.Count)
+    while (!cts.IsCancellationRequested && downloaded + cancelled + failed < urls.Count)
     {
         // Exclude completed tasks
         var filtered = tasks.Where(static t => !t.IsCompleted);
         var completedTask = await Task.WhenAny(filtered);
         completed++;
+        incomplete--;
         switch (completedTask.Status)
         {
             case TaskStatus.RanToCompletion:
@@ -88,15 +93,15 @@ try
         // just completed task
         var finishedIdx = Array.IndexOf(tasks, completedTask);
 
-        mainPb.Message = completed == urls.Count
-            ? $"Downloaded {downloaded}, cancelled {cancelled}, failed {failed}"
-            : $"Processed {completed} of {urls.Count} files";
-        
+        mainPb.Message =
+            $"{downloaded} downloaded, {cancelled} cancelled, {failed} failed, {incomplete} incomplete, {urls.Count - nextUnusedUrlIdx} unused of {urls.Count}";
+
         if (nextUnusedUrlIdx < urls.Count)
         {
             // download any unprocessed URLs.
             var url = urls[nextUnusedUrlIdx];
             tasks[finishedIdx] = DownloadFile(++nextUnusedUrlIdx, url, sharedClient, mainPb, cts.Token);
+            incomplete++;
         }
     }
 
@@ -114,6 +119,65 @@ catch (Exception e)
 finally
 {
     mainPb?.Dispose();
+}
+
+async Task DownloadFile(int id, string url, HttpClient client, ProgressBarBase? progressBar,
+    CancellationToken cancellationToken)
+{
+    var fileName = Path.GetFileName(url);
+    if (string.IsNullOrEmpty(fileName))
+    {
+        fileName = "file.dat";
+    }
+
+    var filePath = $"{id}-{fileName}";
+    var timer = Stopwatch.StartNew();
+    long downloaded = 0;
+    long? totalBytes = null;
+    double lastSpeed = 0;
+    IProgressBar? childPb = null;
+    var sb = new StringBuilder();
+    try
+    {
+        timer.Restart();
+        var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
+            .ConfigureAwait(false);
+        response.EnsureSuccessStatusCode();
+        totalBytes = response.Content.Headers.ContentLength;
+        childPb = totalBytes.HasValue
+            ? progressBar?.Spawn((int)totalBytes.Value, string.Empty)
+            : progressBar?.SpawnIndeterminate(string.Empty);
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.Read);
+
+        var buffer = new byte[4096];
+        int read;
+        while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+        {
+            await fileStream.WriteAsync(buffer.AsMemory(start: 0, length: read), cancellationToken)
+                .ConfigureAwait(false);
+            downloaded += read;
+            lastSpeed = downloaded / timer.Elapsed.TotalSeconds;
+            childPb?.Tick((int)downloaded,
+                GetMessageFromDownloadInfo(sb,
+                    new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, false, false)));
+        }
+
+        childPb?.Tick((int)downloaded,
+            GetMessageFromDownloadInfo(sb, new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, false, true)));
+    }
+    catch (OperationCanceledException)
+    {
+        // File.Delete(filePath);
+        childPb?.Tick((int)downloaded,
+            GetMessageFromDownloadInfo(sb, new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, true, false)));
+        throw;
+    }
+    finally
+    {
+        childPb?.Dispose();
+    }
 }
 
 static (double, string) HumanBytes(double bytes)
@@ -144,87 +208,60 @@ static bool IsUrlValid(string? url)
     }
 }
 
-async Task DownloadFile(int id, string url, HttpClient client, ProgressBarBase? progressBar,
-    CancellationToken cancellationToken)
+static string GetMessageFromDownloadInfo(StringBuilder buffer, DownloadProgressInfo info)
 {
-    var fileName = Path.GetFileName(url);
-    if (string.IsNullOrEmpty(fileName))
+    // Use string builder as function is called a lot
+    buffer.Clear();
+    buffer.Append(info.Id);
+    var (downloadedH, unit) = HumanBytes(info.DownloadedBytes);
+    Span<char> numberFormatted = stackalloc char[10];
+    var success = downloadedH.TryFormat(numberFormatted, out var written, "F2");
+    Debug.Assert(success);
+    if (info.IsCancelled)
     {
-        fileName = "file.dat";
+        buffer.Append(" download cancelled: ");
+        buffer.Append(numberFormatted[..written]);
+        buffer.Append(' ');
+        buffer.Append(unit);
     }
-
-    var filePath = $"{id}-{fileName}";
-    var timer = Stopwatch.StartNew();
-    long downloaded = 0;
-    long? totalBytes = null;
-    double lastSpeed = 0;
-    IProgressBar? childPb = null;
-    try
+    else if (info.IsCompleted)
     {
-        timer.Restart();
-        var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-            .ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        totalBytes = response.Content.Headers.ContentLength;
-        childPb = totalBytes.HasValue
-            ? progressBar?.Spawn((int)totalBytes.Value, string.Empty)
-            : progressBar?.SpawnIndeterminate(string.Empty);
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.Read);
-
-        var buffer = new byte[4096];
-        int read;
-        while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
-        {
-            await fileStream.WriteAsync(buffer.AsMemory(start: 0, length: read), cancellationToken)
-                .ConfigureAwait(false);
-            downloaded += read;
-            lastSpeed = downloaded / timer.Elapsed.TotalSeconds;
-            childPb?.Tick((int)downloaded,
-                GetMessageFromDownloadInfo(
-                    new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, false, false)));
-        }
-
-        childPb?.Tick((int)downloaded,
-            GetMessageFromDownloadInfo(new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, false, true)));
+        buffer.Append(" download completed: ");
+        buffer.Append(numberFormatted[..written]);
+        buffer.Append(' ');
+        buffer.Append(unit);
     }
-    catch (OperationCanceledException)
+    else
     {
-        // File.Delete(filePath);
-        childPb?.Tick((int)downloaded,
-            GetMessageFromDownloadInfo(new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, true, false)));
-        throw;
-    }
-    finally
-    {
-        childPb?.Dispose();
-    }
-
-    return;
-
-    static string GetMessageFromDownloadInfo(DownloadProgressInfo info)
-    {
-        var (downloadedH, unit) = HumanBytes(info.DownloadedBytes);
-        var speed = string.Empty;
-        if (info.DownloadSpeed.HasValue)
-        {
-            var (downloadSpdH, unitSpd) = HumanBytes(info.DownloadSpeed.Value);
-            speed = $" [{downloadSpdH:F2} {unitSpd}ps]";
-        }
-
-        if (info.IsCancelled) return $"{info.Id} download cancelled: {downloadedH:F2} {unit} {speed}";
-        if (info.IsCompleted) return $"{info.Id} download completed: {downloadedH:F2} {unit} {speed}";
-
+        buffer.Append(" downloading ");
+        buffer.Append(numberFormatted[..written]);
+        buffer.Append(' ');
+        buffer.Append(unit);
         var total = info.TotalBytes;
         if (total is not null)
         {
             var (totalH, totalUnit) = HumanBytes(total.Value);
-            return $"{info.Id} downloading {downloadedH:F2} {unit} / {totalH:F2} {totalUnit}{speed}";
+            success = totalH.TryFormat(numberFormatted, out written, "F2");
+            Debug.Assert(success);
+            buffer.Append(" / ");
+            buffer.Append(numberFormatted[..written]);
+            buffer.Append(' ');
+            buffer.Append(totalUnit);
         }
-
-        return $"{info.Id} downloading {downloadedH:F2} {unit}{speed}";
     }
+
+    if (!info.DownloadSpeed.HasValue) return buffer.ToString();
+
+    var (downloadSpdH, spdUnit) = HumanBytes(info.DownloadSpeed.Value);
+    success = downloadSpdH.TryFormat(numberFormatted, out written, "F2");
+    Debug.Assert(success);
+    buffer.Append(" [");
+    buffer.Append(numberFormatted[..written]);
+    buffer.Append(' ');
+    buffer.Append(spdUnit);
+    buffer.Append("ps]");
+    // Allocates a lot
+    return buffer.ToString();
 }
 
 internal readonly record struct DownloadProgressInfo(
