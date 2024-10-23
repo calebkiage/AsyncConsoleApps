@@ -12,6 +12,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "P0StateMachine", "P0StateMa
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "P10AsyncDownloader", "P10AsyncDownloader\P10AsyncDownloader.csproj", "{D230D215-D389-4144-9B9B-52E68107D038}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ConsoleProgressIndicator", "ConsoleProgressIndicator\ConsoleProgressIndicator.csproj", "{C32748EE-6DB9-4EE3-B14D-AD984772793F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "P12ProgressIndicatorExample", "P12ProgressIndicatorExample\P12ProgressIndicatorExample.csproj", "{42D9C1D5-1B72-4A5B-B8FC-53B07E9B629E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -42,5 +46,13 @@ Global
 		{D230D215-D389-4144-9B9B-52E68107D038}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D230D215-D389-4144-9B9B-52E68107D038}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D230D215-D389-4144-9B9B-52E68107D038}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C32748EE-6DB9-4EE3-B14D-AD984772793F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C32748EE-6DB9-4EE3-B14D-AD984772793F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C32748EE-6DB9-4EE3-B14D-AD984772793F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C32748EE-6DB9-4EE3-B14D-AD984772793F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{42D9C1D5-1B72-4A5B-B8FC-53B07E9B629E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{42D9C1D5-1B72-4A5B-B8FC-53B07E9B629E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{42D9C1D5-1B72-4A5B-B8FC-53B07E9B629E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{42D9C1D5-1B72-4A5B-B8FC-53B07E9B629E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal

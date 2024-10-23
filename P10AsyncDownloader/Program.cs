@@ -1,6 +1,6 @@
 ﻿using System.Diagnostics;
 using System.Text;
-using ShellProgressBar;
+using ConsoleProgressIndicator;
 
 var sourcesFile = "sources.txt";
 var batchSize = 5;
@@ -26,12 +26,7 @@ Console.CancelKeyPress += async (_, eventArgs) =>
 using HttpClient sharedClient = new();
 
 var tasks = new Task[batchSize];
-var mainPbOptions = new ProgressBarOptions
-{
-    CollapseWhenFinished = false,
-    ProgressCharacter = '─',
-};
-ProgressBar? mainPb = null;
+using var pm = new ProgressManager();
 try
 {
     // Count lines
@@ -41,14 +36,14 @@ try
         if (IsUrlValid(url)) urls.Add(url);
     }
 
-    mainPb = new ProgressBar(urls.Count,
-        $"0 downloaded, 0 cancelled, 0 failed, 0 incomplete, {urls.Count} unused of {urls.Count}", mainPbOptions);
+    var mainPb = pm.RootProgressIndicator($"0 downloaded, 0 cancelled, 0 failed, 0 incomplete, {urls.Count} unused of {urls.Count}".AsMemory());
+    mainPb.Total = (ulong)urls.Count;
     // Track stats
     var downloaded = 0;
     var cancelled = 0;
     var failed = 0;
     var incomplete = 0;
-    var completed = 0;
+    var completed = 0ul;
     // unused URLs
     var nextUnusedUrlIdx = 0;
     // Queue up the first batch of downloads.
@@ -89,12 +84,11 @@ try
                 break;
         }
 
-        mainPb.Tick(completed);
         // just completed task
         var finishedIdx = Array.IndexOf(tasks, completedTask);
-
         mainPb.Message =
-            $"{downloaded} downloaded, {cancelled} cancelled, {failed} failed, {incomplete} incomplete, {urls.Count - nextUnusedUrlIdx} unused of {urls.Count}";
+            $"{downloaded} downloaded, {cancelled} cancelled, {failed} failed, {incomplete} incomplete, {urls.Count - nextUnusedUrlIdx} unused of {urls.Count}".AsMemory();
+        mainPb.Tick(completed);
 
         if (nextUnusedUrlIdx < urls.Count)
         {
@@ -116,12 +110,8 @@ catch (Exception e)
     Console.WriteLine($"Failed to download files: {e.Message}");
     return 1;
 }
-finally
-{
-    mainPb?.Dispose();
-}
 
-async Task DownloadFile(int id, string url, HttpClient client, ProgressBarBase? progressBar,
+async Task DownloadFile(int id, string url, HttpClient client, ProgressIndicator? progressBar,
     CancellationToken cancellationToken)
 {
     var fileName = Path.GetFileName(url);
@@ -135,7 +125,7 @@ async Task DownloadFile(int id, string url, HttpClient client, ProgressBarBase? 
     long downloaded = 0;
     long? totalBytes = null;
     double lastSpeed = 0;
-    IProgressBar? childPb = null;
+    ProgressIndicator? childPb = null;
     var sb = new StringBuilder();
     try
     {
@@ -145,8 +135,8 @@ async Task DownloadFile(int id, string url, HttpClient client, ProgressBarBase? 
         response.EnsureSuccessStatusCode();
         totalBytes = response.Content.Headers.ContentLength;
         childPb = totalBytes.HasValue
-            ? progressBar?.Spawn((int)totalBytes.Value, string.Empty)
-            : progressBar?.SpawnIndeterminate(string.Empty);
+            ? progressBar?.Spawn((ulong)totalBytes.Value)
+            : progressBar?.SpawnIndeterminate();
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
         await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.Read);
@@ -159,24 +149,19 @@ async Task DownloadFile(int id, string url, HttpClient client, ProgressBarBase? 
                 .ConfigureAwait(false);
             downloaded += read;
             lastSpeed = downloaded / timer.Elapsed.TotalSeconds;
-            childPb?.Tick((int)downloaded,
+            childPb?.Tick((ulong)downloaded,
                 GetMessageFromDownloadInfo(sb,
-                    new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, false, false)));
+                    new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, false, false)).AsMemory());
         }
 
-        childPb?.Tick((int)downloaded,
-            GetMessageFromDownloadInfo(sb, new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, false, true)));
+        childPb?.Tick((ulong)downloaded,
+            GetMessageFromDownloadInfo(sb, new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, false, true)).AsMemory());
     }
     catch (OperationCanceledException)
     {
-        // File.Delete(filePath);
-        childPb?.Tick((int)downloaded,
-            GetMessageFromDownloadInfo(sb, new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, true, false)));
+        childPb?.Tick((ulong)downloaded,
+            GetMessageFromDownloadInfo(sb, new DownloadProgressInfo(id, downloaded, totalBytes, lastSpeed, true, false)).AsMemory());
         throw;
-    }
-    finally
-    {
-        childPb?.Dispose();
     }
 }
 

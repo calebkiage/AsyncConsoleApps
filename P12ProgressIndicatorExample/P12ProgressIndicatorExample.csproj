@@ -8,12 +8,6 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <None Update="sources.txt">
-        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </None>
-    </ItemGroup>
-
-    <ItemGroup>
       <ProjectReference Include="..\ConsoleProgressIndicator\ConsoleProgressIndicator.csproj" />
     </ItemGroup>
 
